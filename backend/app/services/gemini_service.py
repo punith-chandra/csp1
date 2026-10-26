@@ -23,7 +23,8 @@ CRITICAL RULES & SAFETY GUIDELINES:
 3. Strictly avoid dangerous chemical experiments or unsafe handling procedures.
 4. If the user input is NOT a food item (e.g. laptop, chair, car, phone), explicitly state that it is not a food item.
 5. Base food safety answers on trusted authorities: FSSAI (Food Safety and Standards Authority of India), WHO, FAO, CSIR-CFTRI, and AGMARK.
-6. Tone must be professional, objective, encouraging, and educational.
+6. Use plain language for a general audience. Explain unfamiliar terms and give short numbered steps when a process is requested.
+7. Tone must be professional, objective, encouraging, and educational.
 """
 
 def generate_with_gemini_raw(prompt: str) -> Optional[str]:
@@ -72,7 +73,7 @@ def analyze_food_with_llm(food_name: str, rag_context: str) -> Optional[Dict[str
     prompt = f"""{SYSTEM_PROMPT}
 
 You are analyzing the food item: '{food_name}'.
-Trusted knowledge context retrieved from FSSAI & Codex standards:
+Available food/product context (do not claim this came from a regulator unless the context says so):
 {rag_context}
 
 Return a valid JSON object matching this structure EXACTLY:
@@ -147,6 +148,9 @@ Remember:
 - Use phrases like "Preliminary awareness check", "Possible indication", "Laboratory testing is required for confirmation".
 - Do not recommend unsafe chemistry.
 - Provide practical, realistic consumer guidance.
+- Use short sentences and explain each step so a first-time reader can follow it.
+- Use the supplied food reference data for specific details. Do not invent nutrition, health, or product facts when they are missing.
+- Explain technical terms in plain language and make clear that general reference information does not test the user's food.
 """
     raw = generate_with_gemini_raw(prompt)
     if raw:
@@ -154,6 +158,112 @@ Remember:
 
     # Fallback response engine if offline / without API key
     lower_msg = user_message.lower()
+    if food_context:
+        try:
+            context_data = json.loads(food_context)
+        except json.JSONDecodeError:
+            context_data = {}
+
+        if isinstance(context_data, dict) and context_data.get("foodName"):
+            food_name = context_data["foodName"]
+            details = [
+                f"About {food_name}\n"
+                "This is general reference information. It is not a test of your own food."
+            ]
+            if context_data.get("category"):
+                details.append(f"Food group: {context_data['category']}")
+
+            if any(term in lower_msg for term in ("nutrition", "nutrient", "calorie")):
+                nutrition = context_data.get("nutrition") or {}
+                values = nutrition.get("per100g") or {}
+                if values:
+                    nutrient_labels = {
+                        "energy": "Energy",
+                        "protein": "Protein",
+                        "totalFat": "Total fat",
+                        "carbohydrates": "Carbohydrates",
+                        "fiber": "Fiber",
+                        "totalSugars": "Total sugars",
+                        "sodium": "Sodium",
+                    }
+                    nutrient_text = ", ".join(
+                        f"{nutrient_labels.get(name, name.replace('_', ' ').title())}: "
+                        f"{value.get('value')} {value.get('unit', '')}".strip()
+                        for name, value in values.items()
+                    )
+                    details.append(
+                        f"Nutrition values from {nutrition.get('source', 'the reference source')}:\n"
+                        f"{nutrient_text}\n"
+                        "These values belong to that database record. They may not match every brand or serving."
+                    )
+                else:
+                    details.append(
+                        "Nutrition values were not available in the sources for this food.\n"
+                        "Check the nutrition label on the specific package."
+                    )
+            elif any(term in lower_msg for term in ("ingredient", "label", "brand")):
+                product = context_data.get("product") or {}
+                product_details = [
+                    f"{label}: {product[key]}"
+                    for key, label in (
+                        ("brand", "Brand"),
+                        ("ingredients", "Listed ingredients"),
+                        ("countries", "Countries listed"),
+                    )
+                    if product.get(key)
+                ]
+                details.append(
+                    "Product information\n" + "\n".join(f"- {item}" for item in product_details)
+                    if product_details
+                    else "No product-label details were available in the online sources."
+                )
+            elif any(term in lower_msg for term in ("risk", "health", "danger")):
+                risks = context_data.get("healthRisks") or []
+                details.append(
+                    "Possible concerns in the app's general reference\n"
+                    + "\n".join(f"- {risk}" for risk in risks)
+                    if risks
+                    else "No food-specific health-risk information was available in the reference data."
+                )
+                details.append(
+                    "This does not mean your food is contaminated. If a product seems unsafe, do not taste it."
+                )
+            else:
+                overview = context_data.get("overview")
+                if overview:
+                    details.append(f"Overview\n{overview}")
+                adulterants = context_data.get("adulterants") or []
+                if adulterants:
+                    details.append(
+                        "Possible adulterants mentioned in general references\n"
+                        + "\n".join(f"- {item}" for item in adulterants)
+                        + "\nThese are not findings about your sample."
+                    )
+                tips = context_data.get("safeTips") or []
+                if tips:
+                    details.append(
+                        "Buying tips\n" + "\n".join(f"- {tip}" for tip in tips[:3])
+                    )
+                storage = context_data.get("storageTips") or []
+                if storage:
+                    details.append(
+                        "Storage\n" + "\n".join(f"- {tip}" for tip in storage[:2])
+                    )
+
+            sources = context_data.get("sources") or []
+            if sources:
+                details.append(
+                    "Sources used\n" + "\n".join(
+                        f"- {source.get('name', '')}"
+                        for source in sources
+                        if source.get("name")
+                    )
+                )
+            details.append(
+                "Home checks are only preliminary awareness checks; laboratory testing is required for confirmation."
+            )
+            return "\n\n".join(details)
+
     if "health" in lower_msg or "risk" in lower_msg or "danger" in lower_msg:
         return "Adulterated foods can carry various health risks depending on the contaminant. Common adulterants like industrial dyes (such as Metanil Yellow) or detergents can cause digestive distress, kidney load, and toxic exposure over time. For accurate consumer safety, purchase AGMARK or FSSAI-certified sealed foods, and note that household checks are only preliminary indicators—official lab testing is needed for confirmation."
     elif "test" in lower_msg or "check" in lower_msg or "how to" in lower_msg:

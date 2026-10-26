@@ -28,8 +28,26 @@ def run_api_tests():
         assert r2.status_code == 200, f"Laptop returned {r2.status_code}"
         d2 = r2.json()
         assert d2["isFood"] is False
+        assert d2["classification"] == "non_food"
+        assert len(d2["sources"]) >= 1
         assert "message" in d2
         print(f"[OK] Non-food rejection test passed: '{d2.get('foodName')}' -> {d2['message']}")
+
+        # Test unknown item is not mislabeled as food or confirmed non-food
+        r_unknown = client.post("/api/analyze-food", json={"food": "mystery gadget"})
+        assert r_unknown.status_code == 200
+        d_unknown = r_unknown.json()
+        assert d_unknown["isFood"] is False
+        assert d_unknown["classification"] == "uncertain"
+        assert len(d_unknown["sources"]) >= 1
+        print("[OK] Unknown item is marked uncertain and includes web search links")
+
+        # Test recognized powder-based food
+        r_chilli = client.post("/api/analyze-food", json={"food": "chilli powder"})
+        assert r_chilli.status_code == 200
+        assert r_chilli.json()["isFood"] is True
+        assert r_chilli.json()["classification"] == "food"
+        print("[OK] Chilli powder is recognized as food")
 
         # Test Dashboard stats
         r3 = client.get("/api/dashboard-stats")

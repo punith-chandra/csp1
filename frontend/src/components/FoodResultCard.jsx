@@ -4,11 +4,31 @@ import {
   Package, ExternalLink, Info, Sparkles, MessageSquare 
 } from 'lucide-react';
 
+const NUTRIENT_EXPLANATIONS = {
+  energy: 'Energy (calories) is the fuel food provides your body.',
+  protein: 'Protein helps your body build and repair muscles and other tissues.',
+  totalFat: 'Fat provides energy and helps your body absorb some vitamins.',
+  carbohydrates: 'Carbohydrates are one of the body’s main sources of energy.',
+  fiber: 'Fiber supports digestion.',
+  totalSugars: 'Total sugars are included within carbohydrates; the record may not distinguish naturally occurring from added sugar.',
+  sodium: 'Sodium is a mineral found in salt. High sodium intake can be a concern for some people.'
+};
+
 export default function FoodResultCard({ data, onAskFollowUp }) {
   if (!data) return null;
 
   const foodQuery = encodeURIComponent(data.foodName || 'food');
   const foodImageUrl = `https://source.unsplash.com/featured/1200x800/?${foodQuery}`;
+  const onlineSourceNames = (data.dataSource || '')
+    .replace('Curated food-safety reference with ', '')
+    .replace(/ data; available fields vary by food$/, '');
+  const onlineSearches = [
+    { name: 'Google', url: `https://www.google.com/search?q=${foodQuery}` },
+    { name: 'Bing', url: `https://www.bing.com/search?q=${foodQuery}` },
+    { name: 'Wikipedia', url: `https://en.wikipedia.org/w/index.php?search=${foodQuery}` },
+    { name: 'Open Food Facts', url: `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${foodQuery}` },
+    { name: 'USDA FoodData Central', url: `https://fdc.nal.usda.gov/food-search/?query=${foodQuery}` }
+  ];
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200/90 shadow-premium overflow-hidden transition-all duration-300">
@@ -48,6 +68,110 @@ export default function FoodResultCard({ data, onAskFollowUp }) {
         <h2 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-slate-900">
           {data.foodName}
         </h2>
+
+        <section className="rounded-xl border border-sky-200 bg-sky-50/70 p-5">
+            <div className="flex items-center gap-2 text-sky-950 font-bold text-base mb-3">
+              <Info className="w-5 h-5 text-sky-700" />
+              <h3>Food facts and nutrition</h3>
+            </div>
+            <p className="text-sm text-slate-600 mb-4">
+              {onlineSourceNames
+                ? `This result combines the app’s food-safety information with online references from ${onlineSourceNames}.`
+                : 'Food-safety information is shown below. Live nutrition data was not available for this search, but you can check these food-reference sites.'}
+            </p>
+            {data.webInformation && (
+              <div className="mb-4">
+                <h4 className="text-sm font-semibold text-slate-800 mb-1">
+                  {data.webInformation.title}
+                </h4>
+                <p className="text-sm text-slate-700 leading-relaxed">
+                  {data.webInformation.summary}
+                </p>
+              </div>
+            )}
+            {data.productInfo && (
+              <div className="space-y-2 text-sm text-slate-700">
+                {data.productInfo.brand && <p><strong>Brand:</strong> {data.productInfo.brand}</p>}
+                {data.productInfo.ingredients && <p><strong>Listed ingredients:</strong> {data.productInfo.ingredients}</p>}
+                {data.productInfo.countries && <p><strong>Countries listed:</strong> {data.productInfo.countries}</p>}
+                {data.productInfo.nutritionGrade && <p><strong>Nutrition grade:</strong> {data.productInfo.nutritionGrade}</p>}
+                {Object.keys(data.productInfo.nutritionPer100g || {}).length > 0 && (
+                  <div>
+                    <strong>Nutrition per 100 g (catalog data):</strong>
+                    <ul className="mt-1 grid grid-cols-2 gap-x-4 gap-y-1">
+                      {Object.entries(data.productInfo.nutritionPer100g).map(([name, value]) => (
+                        <li key={name}>{name.replace(/([A-Z])/g, ' $1')}: {value}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+            {data.nutritionInformation && (
+              <div className="mt-4">
+                <h4 className="text-sm font-semibold text-slate-800 mb-1">
+                  Nutrition information — {data.nutritionInformation.source}
+                  {data.nutritionInformation.dataType && ` (${data.nutritionInformation.dataType})`}
+                </h4>
+                <p className="text-xs text-slate-600 mb-2">
+                  Values are reported by the linked record. The amount may depend on the record type and serving; compare its source before using it.
+                </p>
+                {Object.keys(data.nutritionInformation.per100g || {}).length > 0 ? (
+                  <ul className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 text-sm text-slate-700">
+                    {Object.entries(data.nutritionInformation.per100g).map(([name, nutrient]) => (
+                      <li key={name} className="rounded-lg bg-white/80 p-2">
+                        <strong className="capitalize">{name.replace(/([A-Z])/g, ' $1')}</strong>: {nutrient.value} {nutrient.unit}
+                        {NUTRIENT_EXPLANATIONS[name] && (
+                          <span className="mt-0.5 block text-xs text-slate-600">
+                            {NUTRIENT_EXPLANATIONS[name]}
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-sm text-slate-600">The source did not provide nutrient values for this record.</p>
+                )}
+              </div>
+            )}
+            {data.productInfo?.nutritionPer100g && Object.keys(data.productInfo.nutritionPer100g).length > 0 && (
+              <div className="mt-4">
+                <h4 className="text-sm font-semibold text-slate-800 mb-1">
+                  Product label nutrition — Open Food Facts catalog
+                </h4>
+                <p className="text-xs text-slate-600 mb-2">
+                  Catalog values are community-submitted and may not match the product package.
+                </p>
+                <ul className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-sm text-slate-700">
+                  {Object.entries(data.productInfo.nutritionPer100g).map(([name, value]) => (
+                    <li key={name}>{name.replace(/([A-Z])/g, ' $1')}: {value}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            <p className="mt-3 text-xs text-slate-500">
+              Online information can be incomplete or out of date. It describes a reference food and does not verify the specific item you have.
+            </p>
+            <div className="mt-4 border-t border-sky-200 pt-3">
+              <h4 className="text-xs font-bold uppercase tracking-wide text-slate-600 mb-2">
+                Explore more food information online
+              </h4>
+              <div className="flex flex-wrap gap-2">
+                {onlineSearches.map((source) => (
+                  <a
+                    key={source.name}
+                    href={source.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 rounded-lg border border-sky-200 bg-white px-3 py-1.5 text-xs font-semibold text-sky-800 hover:bg-sky-100"
+                  >
+                    {source.name}
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
+                ))}
+              </div>
+            </div>
+          </section>
         
         {/* Possible Adulterants */}
         <div className="bg-amber-50/70 border border-amber-200/80 rounded-xl p-5">
@@ -181,9 +305,9 @@ export default function FoodResultCard({ data, onAskFollowUp }) {
           <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
             <div className="flex items-center gap-2 text-slate-800 font-bold text-sm">
               <ExternalLink className="w-4 h-4 text-brand-primary" />
-              <span>Reliable Regulatory & Scientific Sources:</span>
+              <span>Sources and references:</span>
             </div>
-            <span className="text-xs text-slate-400">Verified official standards</span>
+            <span className="text-xs text-slate-400">Open each link to review its information</span>
           </div>
 
           <div className="flex flex-wrap gap-2">

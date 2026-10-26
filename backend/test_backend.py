@@ -29,6 +29,12 @@ def run_tests():
     assert turmeric_res["isFood"] is True
     print(f"   Success! Observation: {turmeric_res['observation'][:60]}...")
 
+    print("\n4b. Testing Powder-based food item: 'Chilli Powder'...")
+    chilli_res = analyze_food_item("chilli powder")
+    assert chilli_res["isFood"] is True, "Expected chilli powder to be recognized as food"
+    assert chilli_res["foodName"].lower() == "chilli powder"
+    print(f"   Success! Food: {chilli_res['foodName']}, Adulterants: {len(chilli_res['adulterants'])} found")
+
     print("\n5. Testing AI Chat fallback...")
     chat_reply = chat_with_food_safety_ai("What are the health risks of adulterated food?")
     assert len(chat_reply) > 20

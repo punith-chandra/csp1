@@ -515,14 +515,27 @@ NON_FOOD_TERMS = {
     "light", "bulb", "lamp", "door", "window", "curtain", "pen", "pencil", "eraser",
     "notebook", "book", "paper", "scissor", "scissors", "bag", "backpack", "shoe",
     "shoes", "sandal", "sandals", "shirt", "pant", "tshirt", "dress", "jeans", "jacket",
-    "cloth", "clothes", "watch", "clock", "mirror", "glass", "bottle", "plastic", "metal",
-    "wood", "stone", "brick", "cement", "soap", "shampoo", "detergent", "powder", "perfume",
-    "battery", "wire", "key", "lock", "camera", "drone", "robot", "software", "python",
-    "react", "javascript", "code", "ai", "hardware", "wallet", "coin", "currency", "umbrella"
+    "watch", "clock", "mirror", "plastic", "metal", "wood", "stone", "brick", "cement",
+    "soap", "shampoo", "detergent", "perfume", "battery", "wire", "key", "lock",
+    "camera", "drone", "robot", "software", "python", "react", "javascript", "code",
+    "ai", "hardware", "wallet", "coin", "currency", "umbrella"
 }
 
 def is_definitely_non_food(query: str) -> bool:
     clean = query.strip().lower()
+    if not clean:
+        return False
+
+    # Known food names and aliases should never be classified as non-food just because
+    # they include a generic ingredient word such as "powder" or "oil".
+    if clean in FOOD_KNOWLEDGE_BASE:
+        return False
+    for item in FOOD_KNOWLEDGE_BASE.values():
+        if clean == item.get("foodName", "").lower():
+            return False
+        if any(clean == alias.lower() for alias in item.get("aliases", [])):
+            return False
+
     words = clean.replace("-", " ").replace("_", " ").split()
     for w in words:
         if w in NON_FOOD_TERMS:

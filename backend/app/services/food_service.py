@@ -1,9 +1,14 @@
-from typing import Dict, Any, Union
+from typing import Dict, Any, List
+from urllib.parse import quote_plus
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 from datetime import datetime
 from app.rag.knowledge_retriever import retriever
 from app.rag.food_db import is_definitely_non_food
 from app.services.gemini_service import analyze_food_with_llm
+from app.services.open_food_facts import find_global_food_product
+from app.services.usda_food_data import find_usda_food_nutrition
+from app.services.web_food_information import find_wikipedia_food_information
 from app.database.db import log_search
 
 def build_official_advisory(data: Dict[str, Any]) -> str:
@@ -116,6 +121,7 @@ def analyze_food_item(food_input: str) -> Dict[str, Any]:
     if not clean_input:
         return {
             "isFood": False,
+            "classification": "uncertain",
             "foodName": "",
             "message": "Please enter a food item.",
             "suggestion": "Try searching for Milk, Turmeric, Honey, Sugar, Ghee, or Edible Oil."
@@ -147,9 +153,11 @@ commodities, such as: Milk, Rice, Turmeric, Honey, Sugar, Ghee, or Edible Oil.
 ================================================================================"""
         return {
             "isFood": False,
+            "classification": "non_food",
             "foodName": clean_input.title(),
             "message": f"'{clean_input.title()}' does not appear to be a food item.",
             "suggestion": "Please enter a food item such as: Milk, Rice, Turmeric, Honey, Sugar, or Edible Oil.",
+            "sources": build_web_search_links(clean_input),
             "officialAdvisoryText": official_non_food_text,
             "documentReference": ref_id
         }
@@ -162,19 +170,126 @@ commodities, such as: Milk, Rice, Turmeric, Honey, Sugar, Ghee, or Edible Oil.
         ref_id = f"ADVISORY-REJ-NF-{hashlib.md5(clean_input.encode()).hexdigest()[:5].upper()}"
         return {
             "isFood": False,
+            "classification": "non_food",
             "foodName": clean_input.title(),
             "message": f"'{clean_input.title()}' does not appear to be a food item.",
             "suggestion": "Please enter a food item such as: Milk, Rice, Turmeric, Honey, Sugar, or Edible Oil.",
+            "sources": build_web_search_links(clean_input),
             "documentReference": ref_id
         }
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        product_lookup = executor.submit(find_global_food_product, clean_input)
+        wikipedia_lookup = executor.submit(find_wikipedia_food_information, clean_input)
+        usda_lookup = executor.submit(find_usda_food_nutrition, clean_input)
+        global_product = product_lookup.result()
+        web_information = wikipedia_lookup.result()
+        usda_nutrition = usda_lookup.result()
+
+    if not matched_data and confidence == 0:
+        if global_product or web_information or usda_nutrition:
+            food_name = (
+                global_product["name"]
+                if global_product
+                else web_information["title"]
+                if web_information
+                else clean_input.title()
+            )
+            category = (
+                (global_product or {}).get("category")
+                or (usda_nutrition or {}).get("category")
+                or "Food item (online reference)"
+            )
+            log_search(food_name, is_food=True, category=category)
+            product_sources = [
+                {"name": "WHO Food Safety", "url": "https://www.who.int/news-room/fact-sheets/detail/food-safety"},
+                {"name": "Codex Alimentarius", "url": "https://www.fao.org/fao-who-codexalimentarius/"}
+            ]
+            if global_product:
+                product_sources.insert(
+                    0,
+                    {"name": "Open Food Facts product record", "url": global_product["url"]},
+                )
+            if web_information:
+                product_sources.insert(
+                    0,
+                    {"name": f"Wikipedia: {web_information['title']}", "url": web_information["url"]},
+                )
+            if usda_nutrition:
+                product_sources.insert(
+                    0,
+                    {"name": "USDA FoodData Central", "url": usda_nutrition["url"]},
+                )
+            online_sources = []
+            if web_information:
+                online_sources.append("Wikipedia")
+            if global_product:
+                online_sources.append("Open Food Facts")
+            if usda_nutrition:
+                online_sources.append("USDA FoodData Central")
+            result = {
+                "isFood": True,
+                "classification": "food",
+                "foodName": food_name,
+                "category": category,
+                "adulterants": [],
+                "whyAdulterated": (
+                    "Online reference information can describe a food, but it does not establish "
+                    "that this item is adulterated or verify its purity."
+                ),
+                "healthRisks": [],
+                "testMethod": "Check the package and label (this is not a purity test)",
+                "testProcedure": (
+                    "1. Make sure the package is sealed and undamaged.\n"
+                    "2. Read the ingredients, allergen notice, and date on the label.\n"
+                    "3. If anything looks unsafe, do not taste it; contact your local food-safety authority."
+                ),
+                "observation": (
+                    "This online reference identifies a food item only. It cannot confirm "
+                    "the contents, safety, or authenticity of the item you have."
+                ),
+                "safeTips": [
+                    "Compare the product name and brand with the package in your hand.",
+                    "Check the seal, ingredients, allergen notice, and expiry or best-before date.",
+                    "Use the food-safety authority for your country to report a concern."
+                ],
+                "storageTips": [
+                    "Follow the storage directions printed on the package.",
+                    "Keep food sealed and separate from chemicals and cleaning products."
+                ],
+                "sources": product_sources,
+                "dataSource": (
+                    f"{', '.join(online_sources)} data; available fields vary by food"
+                ),
+                "disclaimer": (
+                    "Online reference and catalog details may be incomplete or incorrect. They do not "
+                    "verify the food or product you own. For suspected adulteration, contact your local "
+                    "food-safety authority; laboratory testing is required for confirmation."
+                ),
+            }
+            _attach_online_information(
+                result, global_product, web_information, usda_nutrition
+            )
+            return result
+
+        result = {
+            "isFood": False,
+            "classification": "uncertain",
+            "foodName": clean_input.title(),
+            "message": f"We could not confidently classify '{clean_input.title()}' as food or non-food.",
+            "suggestion": "Check the item name using these web searches, or try a food item from the suggestions.",
+            "sources": build_web_search_links(clean_input)
+        }
+        return result
 
     # If matched with high confidence from our curated FSSAI database
     if matched_data and confidence >= 0.7:
         log_search(matched_data["foodName"], is_food=True, category=matched_data.get("category"))
         official_text = build_official_advisory(matched_data)
         ref_id = f"FSSAI-CSP-2026/SOP-{hashlib.md5(matched_data['foodName'].encode()).hexdigest()[:6].upper()}"
-        return {
+        result = {
             "isFood": True,
+            "classification": "food",
             "foodName": matched_data["foodName"],
             "category": matched_data.get("category", "General Food"),
             "adulterants": matched_data.get("adulterants", []),
@@ -191,6 +306,10 @@ commodities, such as: Milk, Rice, Turmeric, Honey, Sugar, Ghee, or Edible Oil.
             "documentReference": ref_id,
             "issuingAuthority": "Sri Vasavi Engineering College (A) • Department of CSE • FSSAI DART Aligned"
         }
+        _attach_online_information(
+            result, global_product, web_information, usda_nutrition
+        )
+        return result
 
     # Fallback to general staple or LLM analysis
     rag_context = f"Analyze food item: {clean_input} for adulteration awareness under FSSAI / Codex standards."
@@ -208,12 +327,17 @@ commodities, such as: Milk, Rice, Turmeric, Honey, Sugar, Ghee, or Edible Oil.
         log_search(llm_result.get("foodName", clean_input.title()), is_food=True, category="General Food")
         official_text = build_official_advisory(llm_result)
         llm_result["officialAdvisoryText"] = official_text
+        llm_result["classification"] = "food"
         llm_result["documentReference"] = f"FSSAI-CSP-2026/SOP-{hashlib.md5(clean_input.encode()).hexdigest()[:6].upper()}"
+        _attach_online_information(
+            llm_result, global_product, web_information, usda_nutrition
+        )
         return llm_result
 
     # Basic fallback
     fallback_data = {
         "isFood": True,
+        "classification": "food",
         "foodName": clean_input.title(),
         "category": "General Food Item",
         "adulterants": ["Extraneous matter / water dilution", "Substandard bulk fillers", "Non-permitted artificial colorants"],
@@ -228,4 +352,80 @@ commodities, such as: Milk, Rice, Turmeric, Honey, Sugar, Ghee, or Edible Oil.
     }
     fallback_data["officialAdvisoryText"] = build_official_advisory(fallback_data)
     fallback_data["documentReference"] = f"FSSAI-CSP-2026/SOP-{hashlib.md5(clean_input.encode()).hexdigest()[:6].upper()}"
+    _attach_online_information(
+        fallback_data, global_product, web_information, usda_nutrition
+    )
     return fallback_data
+
+
+def _attach_online_information(
+    result: Dict[str, Any],
+    global_product: Any,
+    web_information: Any,
+    usda_nutrition: Any,
+) -> None:
+    """Add available public-reference data and citations without replacing curated facts."""
+    sources = result.setdefault("sources", [])
+    known_urls = {source.get("url") for source in sources}
+    if web_information:
+        result["webInformation"] = web_information
+        if web_information["url"] not in known_urls:
+            sources.append({
+                "name": f"Wikipedia: {web_information['title']}",
+                "url": web_information["url"],
+            })
+            known_urls.add(web_information["url"])
+    if global_product:
+        result["productInfo"] = {
+            "brand": global_product.get("brand"),
+            "countries": global_product.get("countries"),
+            "ingredients": global_product.get("ingredients"),
+            "barcode": global_product.get("barcode"),
+            "nutritionGrade": global_product.get("nutritionGrade"),
+            "nutritionPer100g": global_product.get("nutritionPer100g", {}),
+            "url": global_product["url"],
+        }
+        if global_product["url"] not in known_urls:
+            sources.append({
+                "name": "Open Food Facts product record",
+                "url": global_product["url"],
+            })
+            known_urls.add(global_product["url"])
+    if usda_nutrition:
+        result["nutritionInformation"] = {
+            "source": "USDA FoodData Central",
+            "dataType": usda_nutrition.get("dataType"),
+            "per100g": usda_nutrition.get("nutritionPer100g", {}),
+            "url": usda_nutrition["url"],
+        }
+        if usda_nutrition["url"] not in known_urls:
+            sources.append({
+                "name": "USDA FoodData Central",
+                "url": usda_nutrition["url"],
+            })
+    online_sources = []
+    if web_information:
+        online_sources.append("Wikipedia")
+    if global_product:
+        online_sources.append("Open Food Facts")
+    if usda_nutrition:
+        online_sources.append("USDA FoodData Central")
+    if online_sources:
+        result["dataSource"] = (
+            "Curated food-safety reference with " + ", ".join(online_sources) + " data"
+        )
+    for search_link in build_web_search_links(result.get("foodName", ""))[:2]:
+        if search_link["url"] not in known_urls:
+            sources.append(search_link)
+            known_urls.add(search_link["url"])
+
+
+def build_web_search_links(query: str) -> List[Dict[str, str]]:
+    encoded_query = quote_plus(query)
+    return [
+        {"name": "Google web search", "url": f"https://www.google.com/search?q={encoded_query}"},
+        {"name": "Bing web search", "url": f"https://www.bing.com/search?q={encoded_query}"},
+        {"name": "Wikipedia search", "url": f"https://en.wikipedia.org/w/index.php?search={encoded_query}"},
+        {"name": "Open Food Facts search", "url": f"https://world.openfoodfacts.org/cgi/search.pl?search_terms={encoded_query}"},
+        {"name": "USDA FoodData Central", "url": f"https://fdc.nal.usda.gov/food-search/?query={encoded_query}"},
+    ]

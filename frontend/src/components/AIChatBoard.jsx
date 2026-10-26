@@ -5,12 +5,60 @@ import {
   ThumbsDown, ShieldCheck, BarChart3, BookOpen, 
   Users, Sparkles, ExternalLink, ShieldAlert, FileText, ArrowRight, Languages
 } from 'lucide-react';
-import { analyzeFoodItem } from '../services/api';
+import { analyzeFoodItem, getFoodItems, sendChatMessage } from '../services/api';
 import { t } from '../i18n';
+
+const NUTRIENT_EXPLANATIONS = {
+  energy: 'Energy (calories) is the fuel food provides your body.',
+  protein: 'Protein helps your body build and repair muscles and other tissues.',
+  totalFat: 'Fat provides energy and helps your body absorb some vitamins.',
+  carbohydrates: 'Carbohydrates are one of the body’s main sources of energy.',
+  fiber: 'Fiber supports digestion.',
+  totalSugars: 'Total sugars are included within carbohydrates. The record may not distinguish naturally occurring from added sugar.',
+  sodium: 'Sodium is a mineral found in salt. High sodium intake can be a concern for some people.'
+};
+
+function getFoodReferenceLinks(foodName) {
+  const query = encodeURIComponent(foodName || 'food');
+  return [
+    { name: 'Google', url: `https://www.google.com/search?q=${query}` },
+    { name: 'Bing', url: `https://www.bing.com/search?q=${query}` },
+    { name: 'Wikipedia', url: `https://en.wikipedia.org/w/index.php?search=${query}` },
+    { name: 'Open Food Facts', url: `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${query}` },
+    { name: 'USDA FoodData Central', url: `https://fdc.nal.usda.gov/food-search/?query=${query}` }
+  ];
+}
+
+function getFoodSubject(text) {
+  const match = text.match(/\b(?:about|for|of|on)\s+([a-z][a-z\s-]*?)(?:[?.!]|$)/i);
+  return match ? match[1].trim().replace(/\s+(please|thanks)$/i, '') : '';
+}
+
+function createFoodContext(foodData) {
+  return JSON.stringify({
+    foodName: foodData.foodName,
+    category: foodData.category,
+    overview: foodData.webInformation?.summary,
+    product: foodData.productInfo
+      ? {
+          brand: foodData.productInfo.brand,
+          ingredients: foodData.productInfo.ingredients,
+          countries: foodData.productInfo.countries
+        }
+      : undefined,
+    nutrition: foodData.nutritionInformation,
+    adulterants: foodData.adulterants,
+    healthRisks: foodData.healthRisks,
+    safeTips: foodData.safeTips,
+    storageTips: foodData.storageTips,
+    sources: foodData.sources
+  });
+}
 
 export default function AIChatBoard({ onSwitchToProjectView, onOpenPresentation, initialQuery = '', language = 'en', onLanguageChange }) {
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState('');
+  const [foodItems, setFoodItems] = useState([]);
   const [loading, setLoading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isListening, setIsListening] = useState(false);
@@ -40,8 +88,29 @@ export default function AIChatBoard({ onSwitchToProjectView, onOpenPresentation,
   }, [initialQuery]);
 
   useEffect(() => {
+    let isActive = true;
+
+    getFoodItems().then((items) => {
+      if (isActive) setFoodItems(Array.isArray(items) ? items : []);
+    });
+
+    return () => {
+      isActive = false;
+    };
+  }, []);
+
+  useEffect(() => {
     scrollToBottom();
   }, [messages, loading]);
+
+  const normalizedInput = inputValue.trim().toLowerCase();
+  const foodSuggestions = normalizedInput && !loading
+    ? foodItems.filter((item) =>
+        [item.foodName, ...(item.aliases || [])].some((name) =>
+          name?.toLowerCase().includes(normalizedInput)
+        )
+      ).slice(0, 6)
+    : [];
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -65,6 +134,49 @@ export default function AIChatBoard({ onSwitchToProjectView, onOpenPresentation,
     setLoading(true);
 
     try {
+      const isInformationQuestion = /\b(more|tell|explain|detail|information|benefit|nutrition|nutrient|calorie|ingredient|health|risk|how|what|why|storage|safe|source)\b/i.test(text);
+      if (isInformationQuestion) {
+        const subject = getFoodSubject(text);
+        const previousFood = [...messages]
+          .reverse()
+          .find((message) => message.foodData?.isFood)?.foodData;
+        let foodContext = previousFood;
+
+        if (subject && (!previousFood || subject.toLowerCase() !== previousFood.foodName.toLowerCase())) {
+          const subjectData = await analyzeFoodItem(subject);
+          foodContext = subjectData.isFood ? subjectData : null;
+        }
+
+        if (foodContext?.isFood) {
+          const history = [
+            ...messages.filter((message) => message.content).map(({ role, content }) => ({ role, content })),
+            { role: 'user', content: text }
+          ].slice(-10);
+          const response = await sendChatMessage(
+            text,
+            createFoodContext(foodContext),
+            history
+          );
+          setMessages((prev) => [...prev, {
+            id: (Date.now() + 1).toString(),
+            role: 'assistant',
+            isFoodFollowUp: true,
+            foodData: foodContext,
+            content: response.reply,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          }]);
+          setChatHistory((prev) => [
+            {
+              id: Date.now().toString(),
+              title: `${foodContext.foodName} • More information`,
+              query: text
+            },
+            ...prev.filter((item) => item.query.toLowerCase() !== text.toLowerCase())
+          ]);
+          return;
+        }
+      }
+
       const foodData = await analyzeFoodItem(text);
 
       let assistantMessage;
@@ -76,12 +188,16 @@ export default function AIChatBoard({ onSwitchToProjectView, onOpenPresentation,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         };
       } else {
+        const isUncertain = foodData.classification === 'uncertain';
         assistantMessage = {
           id: (Date.now() + 1).toString(),
           role: 'assistant',
-          isNonFood: true,
+          isNonFood: !isUncertain,
+          isUncertain,
           foodData: foodData,
-          content: `**${foodData.foodName || text}** is recognized as a non-food item.`,
+          content: isUncertain
+            ? `The item "${foodData.foodName || text}" could not be confidently classified.`
+            : `**${foodData.foodName || text}** is recognized as a non-food item.`,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         };
       }
@@ -214,14 +330,14 @@ export default function AIChatBoard({ onSwitchToProjectView, onOpenPresentation,
               <button 
                 onClick={handleNewChat}
                 className="p-1.5 hover:text-slate-900 rounded-lg hover:bg-slate-200 transition-colors"
-                title="New analysis"
+                title={t(language, 'New analysis')}
               >
                 <Plus className="w-4 h-4" />
               </button>
               <button 
                 onClick={() => setSidebarOpen(false)}
                 className="p-1.5 hover:text-slate-900 rounded-lg hover:bg-slate-200 transition-colors"
-                title="Collapse sidebar"
+                title={t(language, 'Collapse sidebar')}
               >
                 <PanelLeftClose className="w-4 h-4" />
               </button>
@@ -301,7 +417,7 @@ export default function AIChatBoard({ onSwitchToProjectView, onOpenPresentation,
             <div 
               onClick={onOpenPresentation}
               className="flex items-center gap-3 px-2 py-1.5 rounded-xl hover:bg-slate-100 transition-colors cursor-pointer"
-              title="Click to view Project Team & Guide"
+              title={t(language, 'Click to view Project Team & Guide')}
             >
               <div className="w-8 h-8 rounded-full bg-emerald-700 text-white flex items-center justify-center font-bold text-xs shrink-0 shadow-xs">
                 PP
@@ -320,7 +436,7 @@ export default function AIChatBoard({ onSwitchToProjectView, onOpenPresentation,
             <button
               onClick={onOpenPresentation}
               className="w-full py-1.5 px-3 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-colors border border-slate-200"
-              title="Sri Vasavi Engineering College (Autonomous), Department of CSE"
+              title={t(language, 'Sri Vasavi Engineering College (Autonomous), Department of CSE')}
             >
               <span>🏛️ Sri Vasavi Engg. College (CSE)</span>
             </button>
@@ -341,7 +457,7 @@ export default function AIChatBoard({ onSwitchToProjectView, onOpenPresentation,
                 <button 
                   onClick={() => setSidebarOpen(true)}
                   className="p-1.5 text-slate-600 hover:text-slate-900 rounded-lg hover:bg-slate-100 transition-colors mr-1"
-                  title="Open sidebar"
+                  title={t(language, 'Open sidebar')}
                 >
                   <PanelLeft className="w-5 h-5" />
                 </button>
@@ -477,18 +593,39 @@ export default function AIChatBoard({ onSwitchToProjectView, onOpenPresentation,
                     <div className="space-y-4 max-w-full">
                       
                       {/* Non-food Response */}
-                      {msg.isNonFood && (
+                      {(msg.isNonFood || msg.isUncertain) && (
                         <div className="text-[15px] text-slate-900 leading-relaxed space-y-3 bg-amber-50/70 p-4 rounded-2xl border border-amber-200">
                           <div className="flex items-center gap-2 text-amber-800 font-bold text-base">
                             <ShieldAlert className="w-5 h-5 text-amber-600" />
-                            <span>Non-Food Item Detected: {msg.foodData?.foodName}</span>
+                            <span>
+                              {t(language, msg.isUncertain ? 'Unable to classify item' : 'Non-Food Item Detected')}: {t(language, msg.foodData?.foodName || '')}
+                            </span>
                           </div>
                           <p className="text-slate-700">
-                            <strong>AI-Powered Food Safety and Purity Analysis</strong> is designed specifically for food commodities and edible grocery items.
+                            {msg.isUncertain
+                              ? t(language, 'This item is not in the food reference database, so the app cannot safely predict adulterants or provide a product test.')
+                              : <>{t(language, 'AI-Powered Food Safety and Purity Analysis')} {t(language, 'is designed specifically for food commodities and edible grocery items.')}</>}
                           </p>
                           <p className="text-slate-600 text-sm">
-                            Please check an edible grocery item such as <strong>Milk, Turmeric, Chilli Powder, Honey, Sugar, Ghee, or Edible Oil</strong> to inspect common adulterants and certified home test methods.
+                            {msg.isUncertain
+                              ? t(language, 'Use these web searches to learn more. They open external search pages; this app does not fetch or verify live search results.')
+                              : <>{t(language, 'Please check an edible grocery item such as')} <strong>{['Milk', 'Turmeric', 'Chilli Powder', 'Honey', 'Sugar', 'Ghee', 'Edible Oil'].map((food) => t(language, food)).join(', ')}</strong> {t(language, 'to inspect common adulterants and preliminary home checks.')}</>}
                           </p>
+                          {msg.foodData?.sources?.length > 0 && (
+                            <div className="flex flex-wrap gap-2 pt-1">
+                              {msg.foodData.sources.map((source) => (
+                                <a
+                                  key={source.url}
+                                  href={source.url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-white text-xs font-semibold text-sky-800 border border-sky-200 hover:bg-sky-50"
+                                >
+                                  {source.name}<ExternalLink className="w-3 h-3" />
+                                </a>
+                              ))}
+                            </div>
+                          )}
                           <div className="flex flex-wrap gap-2 pt-1">
                             {['Milk', 'Turmeric', 'Honey', 'Ghee', 'Edible Oil'].map((food) => (
                               <button
@@ -496,7 +633,7 @@ export default function AIChatBoard({ onSwitchToProjectView, onOpenPresentation,
                                 onClick={() => handleSend(food)}
                                 className="px-3 py-1 rounded-full bg-white hover:bg-emerald-50 text-xs font-semibold text-emerald-800 border border-emerald-300 transition-colors"
                               >
-                                Check {food}
+                                {t(language, 'Check')} {t(language, food)}
                               </button>
                             ))}
                           </div>
@@ -504,32 +641,151 @@ export default function AIChatBoard({ onSwitchToProjectView, onOpenPresentation,
                       )}
 
                       {/* Food Safety Conversational Response */}
-                      {msg.foodData?.isFood && (
+                      {msg.isFoodFollowUp && (
+                        <div className="rounded-2xl border border-sky-200 bg-sky-50/70 p-4 text-[15px] leading-relaxed text-slate-800">
+                          <h3 className="mb-2 font-bold text-sky-950">
+                            {t(language, 'More about')} {t(language, msg.foodData.foodName)}
+                          </h3>
+                          <p className="whitespace-pre-line">{msg.content}</p>
+                          <div className="mt-3 flex flex-wrap gap-2 border-t border-sky-200 pt-3">
+                            {getFoodReferenceLinks(msg.foodData.foodName).map((source) => (
+                              <a
+                                key={source.name}
+                                href={source.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 rounded-lg border border-sky-200 bg-white px-3 py-1.5 text-xs font-semibold text-sky-800 hover:bg-sky-100"
+                              >
+                                {source.name}<ExternalLink className="h-3 w-3" />
+                              </a>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {msg.foodData?.isFood && !msg.isFoodFollowUp && (
                         <div className="text-[15px] text-slate-900 leading-relaxed space-y-4 font-sans">
                           
                           {/* Heading */}
                           <div className="border-b border-slate-100 pb-2">
                             <div className="flex items-center gap-2">
                               <h2 className="text-xl font-bold text-slate-900">
-                                {msg.foodData.foodName} – {t(language, 'Safety & Purity Advisory')}
+                                {t(language, msg.foodData.foodName)} – {t(language, 'Safety & Purity Advisory')}
                               </h2>
                               <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-bold">
-                                {t(language, 'Verified')}
+                                {t(language, 'Reference guidance')}
                               </span>
                             </div>
                             <p className="text-xs text-slate-500 mt-0.5">
-                              Category: {msg.foodData.category || 'Food Commodity'} • System: AI-Powered Food Safety and Purity Analysis
+                              {t(language, 'Category:')} {t(language, msg.foodData.category || 'Food Commodity')} • {t(language, 'System: AI-Powered Food Safety and Purity Analysis')}
                             </p>
                           </div>
+
+                          {/* Online food information and plain-language nutrition */}
+                          <section className="space-y-3 rounded-xl border border-sky-200 bg-sky-50/70 p-4">
+                            <h3 className="font-bold text-sky-950 text-base">
+                              {t(language, 'Related food information')}
+                            </h3>
+                            {msg.foodData.dataSource && (
+                              <p className="text-sm text-slate-700">
+                                {t(language, 'Online information found from:')} {msg.foodData.dataSource
+                                  .replace('Curated food-safety reference with ', '')
+                                  .replace(/ data; available fields vary by food$/, '')}.
+                              </p>
+                            )}
+                            {msg.foodData.webInformation && (
+                              <div className="rounded-lg bg-white/80 p-3">
+                                <h4 className="font-semibold text-slate-800">
+                                  {t(language, msg.foodData.webInformation.title)}
+                                </h4>
+                                <p className="mt-1 text-sm leading-relaxed text-slate-700">
+                                  {t(language, msg.foodData.webInformation.summary)}
+                                </p>
+                              </div>
+                            )}
+                            {msg.foodData.productInfo && (
+                              <div className="space-y-1 text-sm text-slate-700">
+                                {msg.foodData.productInfo.brand && <p><strong>{t(language, 'Brand:')}</strong> {msg.foodData.productInfo.brand}</p>}
+                                {msg.foodData.productInfo.ingredients && <p><strong>{t(language, 'Listed ingredients:')}</strong> {msg.foodData.productInfo.ingredients}</p>}
+                                {msg.foodData.productInfo.countries && <p><strong>{t(language, 'Countries listed:')}</strong> {msg.foodData.productInfo.countries}</p>}
+                                {msg.foodData.productInfo.nutritionGrade && <p><strong>{t(language, 'Catalog nutrition grade:')}</strong> {msg.foodData.productInfo.nutritionGrade}</p>}
+                              </div>
+                            )}
+                            {msg.foodData.nutritionInformation && (
+                              <div className="rounded-lg bg-white/80 p-3">
+                                <h4 className="font-semibold text-slate-800">
+                                  {t(language, 'Nutrition information —')} {msg.foodData.nutritionInformation.source}
+                                  {msg.foodData.nutritionInformation.dataType && ` (${t(language, msg.foodData.nutritionInformation.dataType)})`}
+                                </h4>
+                                <p className="mt-1 text-xs text-slate-600">
+                                  {t(language, 'Values come from this database record. Check its source and serving details; the values may not match every brand or recipe.')}
+                                </p>
+                                {Object.keys(msg.foodData.nutritionInformation.per100g || {}).length > 0 ? (
+                                  <ul className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                    {Object.entries(msg.foodData.nutritionInformation.per100g).map(([name, nutrient]) => (
+                                      <li key={name} className="rounded-md border border-slate-100 p-2 text-sm text-slate-800">
+                                        <strong className="capitalize">{t(language, name.replace(/([A-Z])/g, ' $1'))}</strong>: {nutrient.value} {nutrient.unit}
+                                        {NUTRIENT_EXPLANATIONS[name] && (
+                                          <span className="mt-0.5 block text-xs text-slate-600">
+                                            {t(language, NUTRIENT_EXPLANATIONS[name])}
+                                          </span>
+                                        )}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                ) : (
+                                  <p className="mt-2 text-sm text-slate-600">
+                                    {t(language, 'No nutrient values were provided for this database record.')}
+                                  </p>
+                                )}
+                              </div>
+                            )}
+                            {msg.foodData.productInfo?.nutritionPer100g && Object.keys(msg.foodData.productInfo.nutritionPer100g).length > 0 && (
+                              <div className="rounded-lg bg-white/80 p-3 text-sm text-slate-700">
+                                <h4 className="font-semibold text-slate-800">
+                                  {t(language, 'Product-label nutrition — Open Food Facts catalog')}
+                                </h4>
+                                <p className="mt-1 text-xs text-slate-600">
+                                  {t(language, 'These community-submitted values may not match the package. Check the label on your product.')}
+                                </p>
+                                <ul className="mt-2 grid grid-cols-1 gap-1 sm:grid-cols-2">
+                                  {Object.entries(msg.foodData.productInfo.nutritionPer100g).map(([name, value]) => (
+                                    <li key={name}>{t(language, name.replace(/([A-Z])/g, ' $1'))}: {value}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+                            {!msg.foodData.webInformation && !msg.foodData.productInfo && !msg.foodData.nutritionInformation && (
+                              <p className="text-sm text-slate-700">
+                                {t(language, 'Live data was unavailable for this search. Use the direct links below to look up this food on other sites.')}
+                              </p>
+                            )}
+                            <p className="text-xs text-slate-500">
+                              {t(language, 'Online references may be incomplete or out of date. They describe reference records and do not verify the specific food you have.')}
+                            </p>
+                            <div className="flex flex-wrap gap-2 border-t border-sky-200 pt-3">
+                              {getFoodReferenceLinks(msg.foodData.foodName).map((source) => (
+                                <a
+                                  key={source.name}
+                                  href={source.url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1 rounded-lg border border-sky-200 bg-white px-3 py-1.5 text-xs font-semibold text-sky-800 hover:bg-sky-100"
+                                >
+                                  {source.name}<ExternalLink className="h-3 w-3" />
+                                </a>
+                              ))}
+                            </div>
+                          </section>
 
                           {/* 1. Common Adulterants */}
                           <div className="space-y-1.5">
                             <h3 className="font-bold text-slate-900 text-base flex items-center gap-2">
-                              <span>1. {t(language, 'Possible Adulterants')}</span>
+                              <span>1. {t(language, 'Possible adulterants (risk indicators, not a sample result)')}</span>
                             </h3>
                             <ul className="list-disc list-inside space-y-1 text-slate-800 text-[14px]">
                               {(msg.foodData.adulterants || []).map((item, idx) => (
-                                <li key={idx}><span className="font-semibold text-slate-900">{item}</span></li>
+                                <li key={idx}><span className="font-semibold text-slate-900">{t(language, item)}</span></li>
                               ))}
                             </ul>
                           </div>
@@ -540,7 +796,7 @@ export default function AIChatBoard({ onSwitchToProjectView, onOpenPresentation,
                               2. {t(language, 'Motivation for Adulteration')}
                             </h3>
                             <p className="text-slate-700 text-[14px] leading-relaxed">
-                              {msg.foodData.whyAdulterated}
+                              {t(language, msg.foodData.whyAdulterated)}
                             </p>
                           </div>
 
@@ -550,18 +806,23 @@ export default function AIChatBoard({ onSwitchToProjectView, onOpenPresentation,
                               <span>🧪 3. {t(language, 'Preliminary Awareness Test Method')}</span>
                             </h3>
                             <p className="text-[14px] text-slate-800">
-                              <strong>{t(language, 'Check:')} </strong>{msg.foodData.testMethod}
+                              <strong>{t(language, 'Check:')} </strong>{t(language, msg.foodData.testMethod)}
                             </p>
                             {msg.foodData.testProcedure && (
-                              <p className="text-[14px] text-slate-700 whitespace-pre-line bg-white p-3 rounded-lg border border-emerald-200">
-                                <strong>{t(language, 'Step-by-step Procedure:')} </strong><br />{msg.foodData.testProcedure}
-                              </p>
+                              <div className="text-[14px] text-slate-700 bg-white p-3 rounded-lg border border-emerald-200">
+                                <strong>{t(language, 'Step-by-step Procedure:')}</strong>
+                                <ol className="list-decimal list-inside mt-2 space-y-1">
+                                  {msg.foodData.testProcedure.split(/\r?\n/).filter(Boolean).map((step, idx) => (
+                                    <li key={idx}>{t(language, step.replace(/^\s*\d+[.)]\s*/, ''))}</li>
+                                  ))}
+                                </ol>
+                              </div>
                             )}
                             <p className="text-[14px] text-slate-800">
-                              <strong>{t(language, 'Expected Result:')} </strong>{msg.foodData.observation}
+                              <strong>{t(language, 'Expected Result:')} </strong>{t(language, msg.foodData.observation)}
                             </p>
                             <div className="text-[12px] text-amber-900 bg-amber-50 p-2.5 rounded border border-amber-200 mt-2 font-medium">
-                              ⚠️ <em><strong>{t(language, 'Advisory:')}</strong> This is a preliminary household awareness check. Certified laboratory testing is required for scientific legal confirmation. Do not consume tested food portions.</em>
+                              ⚠️ <em><strong>{t(language, 'Advisory:')}</strong> {t(language, 'This is a preliminary household awareness check. Certified laboratory testing is required for scientific legal confirmation. Do not consume tested food portions.')}</em>
                             </div>
                           </div>
 
@@ -572,7 +833,7 @@ export default function AIChatBoard({ onSwitchToProjectView, onOpenPresentation,
                             </h3>
                             <ul className="list-disc list-inside space-y-1 text-slate-800 text-[14px]">
                               {(msg.foodData.healthRisks || []).map((risk, idx) => (
-                                <li key={idx}>{risk}</li>
+                                <li key={idx}>{t(language, risk)}</li>
                               ))}
                             </ul>
                           </div>
@@ -584,7 +845,7 @@ export default function AIChatBoard({ onSwitchToProjectView, onOpenPresentation,
                             </h3>
                             <ul className="list-disc list-inside space-y-1 text-slate-800 text-[14px]">
                               {(msg.foodData.safeTips || []).map((tip, idx) => (
-                                <li key={idx}>{tip}</li>
+                                <li key={idx}>{t(language, tip)}</li>
                               ))}
                             </ul>
                           </div>
@@ -596,14 +857,14 @@ export default function AIChatBoard({ onSwitchToProjectView, onOpenPresentation,
                             </h3>
                             <ul className="list-disc list-inside space-y-1 text-slate-800 text-[14px]">
                               {(msg.foodData.storageTips || []).map((tip, idx) => (
-                                <li key={idx}>{tip}</li>
+                                <li key={idx}>{t(language, tip)}</li>
                               ))}
                             </ul>
                           </div>
 
                           {/* 7. Official Sources */}
                           <div className="space-y-1 pt-2 border-t border-slate-200 text-xs text-slate-600">
-                            <strong>{t(language, 'Authoritative References & Standards:')}</strong>
+                            <strong>{t(language, 'Food safety sources and references:')}</strong>
                             <div className="flex flex-wrap gap-2 mt-1">
                               {(msg.foodData.sources || []).map((s, idx) => (
                                 <a
@@ -626,7 +887,7 @@ export default function AIChatBoard({ onSwitchToProjectView, onOpenPresentation,
                       {/* Action Icons below response */}
                       <div className="flex items-center gap-1 text-slate-400 text-xs pt-1">
                         <button
-                          onClick={() => handleCopy(msg.id, msg.foodData ? getFoodSummaryText(msg.foodData) : msg.content)}
+                          onClick={() => handleCopy(msg.id, msg.foodData && !msg.isFoodFollowUp ? getFoodSummaryText(msg.foodData) : msg.content)}
                           className="p-1.5 hover:text-slate-800 rounded-lg hover:bg-slate-100 transition-colors"
                           title={t(language, 'Copy response')}
                         >
@@ -634,7 +895,7 @@ export default function AIChatBoard({ onSwitchToProjectView, onOpenPresentation,
                         </button>
 
                         <button
-                          onClick={() => handleSpeak(msg.id, msg.foodData ? getFoodSummaryText(msg.foodData) : msg.content)}
+                          onClick={() => handleSpeak(msg.id, msg.foodData && !msg.isFoodFollowUp ? getFoodSummaryText(msg.foodData) : msg.content)}
                           className="p-1.5 hover:text-slate-800 rounded-lg hover:bg-slate-100 transition-colors"
                           title={t(language, 'Read aloud')}
                         >
@@ -720,6 +981,35 @@ export default function AIChatBoard({ onSwitchToProjectView, onOpenPresentation,
               </div>
             )}
 
+            {foodSuggestions.length > 0 && (
+              <div
+                role="listbox"
+                aria-label="Food suggestions"
+                className="absolute bottom-16 left-0 right-0 z-40 max-h-72 overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-xl"
+              >
+                <p className="px-3 py-2 text-[11px] font-semibold text-slate-500">
+                  Select a food to view its product and safety details
+                </p>
+                {foodSuggestions.map((food) => (
+                  <button
+                    key={food.foodName}
+                    type="button"
+                    role="option"
+                    aria-selected="false"
+                    onClick={() => handleSend(food.foodName)}
+                    className="flex w-full items-center justify-between rounded-xl px-3 py-2.5 text-left hover:bg-emerald-50 focus:bg-emerald-50 focus:outline-none"
+                  >
+                    <span className="font-semibold text-sm text-slate-800">
+                      {food.foodName}
+                    </span>
+                    <span className="text-xs text-slate-500">
+                      {food.category || 'Food item'}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+
             {/* Pill Container */}
             <div className="flex items-center bg-white rounded-full border border-slate-300 shadow-[0_2px_8px_rgba(0,0,0,0.06)] hover:shadow-md focus-within:shadow-md focus-within:border-emerald-500 transition-all px-3 py-2">
               
@@ -791,16 +1081,16 @@ export default function AIChatBoard({ onSwitchToProjectView, onOpenPresentation,
             </div>
             <div className="space-y-3 text-xs sm:text-sm text-slate-700 max-h-96 overflow-y-auto">
               <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200">
-                <strong className="text-emerald-950 block mb-1">FSSAI (Food Safety and Standards Authority of India):</strong>
-                Mandates 14-digit license number and Food Safety Logo on all manufactured food products.
+                <strong className="text-emerald-950 block mb-1">{t(language, 'FSSAI (Food Safety and Standards Authority of India):')}</strong>
+                {t(language, 'Mandates 14-digit license number and Food Safety Logo on all manufactured food products.')}
               </div>
               <div className="p-3 bg-teal-50 rounded-xl border border-teal-200">
-                <strong className="text-teal-950 block mb-1">AGMARK Certification:</strong>
-                Quality grade certification for agricultural products including pure honey, ghee, and edible spices.
+                <strong className="text-teal-950 block mb-1">{t(language, 'AGMARK Certification:')}</strong>
+                {t(language, 'Quality grade certification for agricultural products including pure honey, ghee, and edible spices.')}
               </div>
               <div className="p-3 bg-blue-50 rounded-xl border border-blue-200">
-                <strong className="text-blue-950 block mb-1">Jaago Grahak Jaago Guidelines:</strong>
-                Encourages consumers to demand sealed packaging and report adulterated food to local food inspectors.
+                <strong className="text-blue-950 block mb-1">{t(language, 'Jaago Grahak Jaago Guidelines:')}</strong>
+                {t(language, 'Encourages consumers to demand sealed packaging and report adulterated food to local food inspectors.')}
               </div>
             </div>
             <div className="text-right">

@@ -119,17 +119,39 @@ export async function submitCitizenFeedback(feedbackData) {
 // Client fallback if backend is offline
 function fallbackAnalyzer(food) {
   const clean = food.trim().toLowerCase();
-  const nonFoods = ["laptop", "chair", "mobile", "phone", "car", "computer", "table", "book", "pen", "shoe", "bottle"];
-  if (nonFoods.includes(clean)) {
+  const nonFoods = new Set(["laptop", "chair", "mobile", "phone", "car", "computer", "table", "book", "pen", "shoe", "bottle"]);
+  const foodItems = new Set(["milk", "turmeric", "turmeric powder", "chilli powder", "honey", "sugar", "ghee", "edible oil", "rice", "tea", "coffee", "black pepper", "salt"]);
+  const searchLinks = [
+    { name: "Google web search", url: `https://www.google.com/search?q=${encodeURIComponent(food)}` },
+    { name: "Bing web search", url: `https://www.bing.com/search?q=${encodeURIComponent(food)}` },
+    { name: "Wikipedia search", url: `https://en.wikipedia.org/w/index.php?search=${encodeURIComponent(food)}` }
+  ];
+
+  if (clean.split(/[\s_-]+/).some((word) => nonFoods.has(word))) {
     return {
       isFood: false,
+      classification: "non_food",
       foodName: food,
       message: `${food} does not appear to be a food item.`,
-      suggestion: "Please enter a food item such as: Milk, Rice, Turmeric, Honey, Sugar or Edible Oil."
+      suggestion: "Please enter a food item such as: Milk, Rice, Turmeric, Honey, Sugar or Edible Oil.",
+      sources: searchLinks
     };
   }
+
+  if (!foodItems.has(clean)) {
+    return {
+      isFood: false,
+      classification: "uncertain",
+      foodName: food,
+      message: `We could not confidently classify "${food}" as food or non-food.`,
+      suggestion: "Check the item using these web searches, or try a food item from the suggestions.",
+      sources: searchLinks
+    };
+  }
+
   return {
     isFood: true,
+    classification: "food",
     foodName: food.charAt(0).toUpperCase() + food.slice(1),
     category: "General Food",
     adulterants: ["Common low-grade fillers", "Water / dilution", "Unpermitted coloring agents"],
